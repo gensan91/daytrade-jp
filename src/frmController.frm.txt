@@ -1,0 +1,31 @@
+Private Sub CommandButton1_Click()
+    Call StartGapMonitoring
+End Sub
+
+Private Sub commandButton2_Click()
+    Call StopGapMonitoring
+End Sub
+
+Private Sub CommandButton3_Click()
+    Call RecordEntry
+End Sub
+
+Private Sub CommandButton4_Click()
+    Call RecordExit
+End Sub
+
+Private Sub CommandButton5_Click()
+    Call StopPositionMonitoring
+End Sub
+
+Private Sub CommandButton6_Click()
+    Call SnapshotWatchlist
+End Sub
+
+Private Sub CommandButton7_Click()
+    Call FreezeSnapshot
+End Sub
+
+Private Sub CommandButton8_Click()
+    Me.Hide
+End Sub
