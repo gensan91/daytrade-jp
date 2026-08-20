@@ -91,9 +91,8 @@
 - 【公式】`data_j.xls` を https://www.jpx.co.jp/markets/statistics-equities/misc/01.html から入手
 - 毎月第3営業日に前月末データへ更新
 - プライム＋スタンダードの内国株式のみで **3,117銘柄**（2026/8時点）
-- 保存先：`C:\Users\gensa\OneDrive\株・資産管理\銘柄表\data_j.xls`
-  （`modScreening.JPX_FILE_PATH` にハードコード）
-
+- 保存先：`%USERPROFILE%\OneDrive\株・資産管理\銘柄表\data_j.xls`
+  （`modScreening` は `Environ$("USERPROFILE")` と相対パス定数から組み立てる。ユーザー名はコードにもドキュメントにも埋め込まない）
 ---
 
 ## 6. VBA / Excel の落とし穴
