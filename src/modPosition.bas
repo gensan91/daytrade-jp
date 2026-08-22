@@ -25,6 +25,16 @@ Option Explicit
 '       ボタンを押した時刻は P列に別途記録する。
 '   [D] 決済アラートのMsgBoxは1回だけ。以降は音とステータスバーのみ。
 '       次回OnTime予約を判定より先に行い、連鎖切れを防ぐ。
+' 2026/8/21 改訂
+'   [N] 決済理由の自由入力をやめ、番号選択に変更した。
+'       InputBox の例示文が「損切り」だったため、8/19「損切」/
+'       8/21「損切り」の表記ゆれが実データに混入した。
+'       20件集計時に決済理由で層別する予定があるため、保存される
+'       文字列を5種類に固定する。ロジックはこの文字列を参照していない
+'       （Trades K列 と Log I列 に書くだけ）ので副作用はない。
+'       あわせて「損益率を計算 → 理由を聞く」に順序を入れ替え、
+'       理由入力をキャンセルしたときに何も書き込まないようにした。
+'       （従来はキャンセルしても空文字で決済確定していた）
 ' 2026/8/14 改訂
 '   [G] Trades の「日付」を退避実行日ではなくエントリー時刻から決める。
 '       自動退避だと翌営業日の日付が入ってしまっていた。
@@ -445,15 +455,25 @@ Sub RecordExit()
         Exit Sub
     End If
 
-    Dim reason As String
-    reason = InputBox("決済理由を入力してください（例: 損切り／利確／時間切れ／引け前強制）", _
-                      "決済記録", ws.Cells(POS_ROW, PCOL_EXITREASON).Value)
-
     Dim entryPrice As Double
     entryPrice = SafeNumP(ws.Cells(POS_ROW, PCOL_ENTRYPRICE).Value)
 
+    If entryPrice <= 0 Then
+        MsgBox "エントリー価格が読めません（C列）。決済記録を中止します。", vbCritical
+        Exit Sub
+    End If
+
     Dim plPct As Double
     plPct = (CDbl(exitPrice) - entryPrice) / entryPrice * 100
+
+    ' [N] 損益率が確定してから理由を聞く（推定初期値に損益率を使うため）
+    Dim reason As String
+    reason = AskExitReason(plPct, ws.Cells(POS_ROW, PCOL_ENTRYTIME).Value)
+    If reason = "" Then
+        MsgBox "決済記録を中止しました。" & vbCrLf & _
+               "ポジションは監視中のまま残っています。", vbExclamation, "決済記録"
+        Exit Sub
+    End If
 
     ws.Cells(POS_ROW, PCOL_STATUS).Value = "決済済"
     ws.Cells(POS_ROW, PCOL_EXITREASON).Value = reason
@@ -485,6 +505,91 @@ Sub RecordExit()
            "※ブックを閉じると追跡は止まります。", _
            vbInformation, "決済記録"
 End Sub
+
+' ============================================================
+' [N] 決済理由の選択（表記ゆれ根絶）
+'
+' 保存される文字列はこの5種類のみ。集計時のキーになるため、
+' 一度確定したら安易に文言を変えないこと。変えると過去行と
+' 突き合わせられなくなる。
+'   「時間切れ」は実態としては「ランナー失格」（15分経過 AND
+'   含み益が利確の半分未満）だが、既存3件が「時間切れ」で
+'   記録済みのため、保存値は変えず画面表示だけ補足する。
+' ============================================================
+Private Const EXITREASON_LIST As String = "利確|損切|時間切れ|引け前強制|手動判断"
+
+Private Function ReasonByIndex(idx As Long) As String
+    Dim a() As String
+    a = Split(EXITREASON_LIST, "|")
+    If idx >= 1 And idx <= UBound(a) + 1 Then ReasonByIndex = a(idx - 1)
+End Function
+
+' ------------------------------------------------------------
+' 損益率と経過時間から、最もありそうな決済理由の番号を推定する。
+' 判定条件は CheckPosition の自動判定と同じものを使う。
+' ------------------------------------------------------------
+Private Function SuggestReasonIndex(plPct As Double, entryTime As Variant) As Long
+    Dim elapsedMin As Double
+    elapsedMin = -1
+
+    On Error Resume Next
+    If IsDate(entryTime) Then elapsedMin = (Now - CDate(entryTime)) * 1440#
+    On Error GoTo 0
+
+    If plPct >= TakeProfitPct Then
+        SuggestReasonIndex = 1                  ' 利確
+    ElseIf plPct <= StopLossPct Then
+        SuggestReasonIndex = 2                  ' 損切
+    ElseIf TimeValue(Now) >= ForcedExitTime Then
+        SuggestReasonIndex = 4                  ' 引け前強制
+    ElseIf elapsedMin >= TimeStopMinutes And plPct < TakeProfitPct / 2 Then
+        SuggestReasonIndex = 3                  ' 時間切れ
+    Else
+        SuggestReasonIndex = 5                  ' 手動判断
+    End If
+End Function
+
+' ------------------------------------------------------------
+' 番号で決済理由を選ばせる。戻り値が "" のときはキャンセル。
+' 1～5 以外を入れた場合は確定させず再入力を求める。
+' ------------------------------------------------------------
+Private Function AskExitReason(plPct As Double, entryTime As Variant) As String
+    Dim def As Long
+    def = SuggestReasonIndex(plPct, entryTime)
+
+    Dim msg As String
+    msg = "決済理由を番号で選んでください。" & vbCrLf & vbCrLf & _
+          "  1: 利確" & vbCrLf & _
+          "  2: 損切" & vbCrLf & _
+          "  3: 時間切れ（ランナー失格）" & vbCrLf & _
+          "  4: 引け前強制" & vbCrLf & _
+          "  5: 手動判断" & vbCrLf & vbCrLf & _
+          "損益率 " & Format(plPct, "+0.00;-0.00") & "% から " & _
+          def & ": " & ReasonByIndex(def) & " を推定しました。" & vbCrLf & _
+          "このままでよければ そのまま [OK] を押してください。"
+
+    Dim s As String, n As Long
+    Do
+        s = InputBox(msg, "決済理由の選択", CStr(def))
+
+        If s = "" Then
+            AskExitReason = ""
+            Exit Function
+        End If
+
+        If IsNumeric(s) Then
+            n = CLng(Val(s))
+            If ReasonByIndex(n) <> "" Then
+                AskExitReason = ReasonByIndex(n)
+                Exit Function
+            End If
+        End If
+
+        MsgBox "1～5 の番号で入力してください。" & vbCrLf & _
+               "（キャンセルしたい場合は [キャンセル] を押してください）", _
+               vbExclamation, "決済理由の選択"
+    Loop
+End Function
 
 ' ============================================================
 ' [A] Trades シート（トレード履歴）
