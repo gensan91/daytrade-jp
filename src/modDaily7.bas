@@ -29,7 +29,7 @@ Option Explicit
 '   3) Call BuildDailyStats   … 選別候補の全銘柄（10並列）
 '======================================================
 
-Private Const BASE_DATE As String = "2026/08/08"
+Private Const BASE_DATE As String = "2026/08/22"  ' ← 週次で直近営業日に更新すること
 Private Const START_OFFSET_DAYS As Long = 45   ' 起点＝基準日の何日前にするか
 Private Const BARS As Long = 40                ' 要求本数
 Private Const USE_BARS As Long = 20            ' 集計に使う直近本数
@@ -434,4 +434,335 @@ Private Function GetSheet(nm As String) As Worksheet
         ws.Name = nm
     End If
     Set GetSheet = ws
-End Function
+End Function
+
+'------------------------------------------------------
+' [P1-A] 過去3件（8/10 4813 / 8/13 7322 / 8/14 8550）の始値を取得する
+'
+' 実行前提：マーケットスピードII 起動・ログイン済み
+' 実行場所：Alt+F8 → FetchPastOpenPrices → 実行
+' 結果はMsgBoxとイミディエイトウィンドウに出力される
+' 取得後、Trades シート U列（行2～4）に手動で追記すること
+'------------------------------------------------------
+Sub FetchPastOpenPrices()
+    Const FP_START As Long = 20260701
+    Const FP_BARS  As Long = 40
+
+    Dim codes(1 To 3)        As String
+    Dim names(1 To 3)        As String
+    Dim entryPrices(1 To 3)  As Double
+    Dim targetDates(1 To 3)  As String
+
+    codes(1) = "4813": names(1) = "ACCESS":   entryPrices(1) = 393:  targetDates(1) = "2026/08/10"
+    codes(2) = "7322": names(2) = "三十三FG": entryPrices(2) = 1975: targetDates(2) = "2026/08/13"
+    codes(3) = "8550": names(3) = "栃木銀行": entryPrices(3) = 1115: targetDates(3) = "2026/08/14"
+
+    Dim ws As Worksheet
+    Set ws = GetSheet(SH_WORK)
+    ws.Range(ws.Cells(1, 1), ws.Cells(FP_BARS + 5, 3 * BLOCK_W + 2)).Clear
+    ws.Visible = xlSheetVisible
+    ws.Activate
+
+    Dim i As Long
+    For i = 1 To 3
+        ws.Cells(1, 1 + (i - 1) * BLOCK_W).Formula = _
+            "=RssChartPast(,""" & codes(i) & ".T"",""D""," & FP_START & "," & FP_BARS & ")"
+    Next i
+
+    Dim t As Single, ready As Long
+    t = Timer
+    Do
+        DoEvents
+        Application.Calculate
+        ready = 0
+        For i = 1 To 3
+            If CountRows(ws, 1 + (i - 1) * BLOCK_W) >= 15 Then ready = ready + 1
+        Next i
+        If ready >= 3 Then Exit Do
+    Loop While Timer - t < 45
+
+    Dim msg As String
+    msg = "=== 過去3件 始値取得結果 ===" & vbCrLf & vbCrLf
+
+    For i = 1 To 3
+        Dim baseCol As Long: baseCol = 1 + (i - 1) * BLOCK_W
+        Dim n As Long: n = CountRows(ws, baseCol)
+        Dim found As Boolean: found = False
+        Dim targetD As Date: targetD = CDate(targetDates(i))
+        Dim r As Long
+
+        For r = 0 To n - 1
+            Dim dv As Variant
+            dv = ws.Cells(DATA_ROW + r, baseCol + 3).Value
+            If IsDate(dv) Then
+                If CDate(dv) = targetD Then
+                    Dim openP As Double, hiP As Double, loP As Double
+                    Dim clP As Double, prevCl As Double
+                    openP  = SafeD(ws.Cells(DATA_ROW + r,     baseCol + 5).Value)
+                    hiP    = SafeD(ws.Cells(DATA_ROW + r,     baseCol + 6).Value)
+                    loP    = SafeD(ws.Cells(DATA_ROW + r,     baseCol + 7).Value)
+                    clP    = SafeD(ws.Cells(DATA_ROW + r,     baseCol + 8).Value)
+                    If r > 0 Then _
+                        prevCl = SafeD(ws.Cells(DATA_ROW + r - 1, baseCol + 8).Value)
+
+                    Dim gapPct As Double
+                    If prevCl > 0 Then gapPct = (openP - prevCl) / prevCl * 100
+
+                    Dim tpT As Double: tpT = openP * 1.03
+                    Dim slT As Double: slT = openP * 0.98
+
+                    Dim verdict As String
+                    If hiP >= tpT And loP <= slT Then
+                        verdict = "不明（順序依存）"
+                    ElseIf hiP >= tpT Then
+                        verdict = "利確（順序非依存）"
+                    ElseIf loP <= slT Then
+                        verdict = "損切（順序非依存）"
+                    Else
+                        verdict = "未達"
+                    End If
+
+                    Dim premium As Double
+                    If openP > 0 Then premium = (entryPrices(i) - openP) / openP * 100
+
+                    msg = msg & Format(targetD, "m/d") & " " & codes(i) & " " & names(i) & vbCrLf & _
+                          "  前日終値=" & prevCl & "  始値=" & openP & _
+                          "  高値=" & hiP & "  安値=" & loP & vbCrLf & _
+                          "  真ギャップ=" & Format(gapPct, "+0.00;-0.00") & "%" & vbCrLf & _
+                          "  エントリー=" & entryPrices(i) & _
+                          "  上乗せ=" & Format(entryPrices(i) - openP, "+0;-0") & "円" & _
+                          " (" & Format(premium, "+0.00;-0.00") & "%)" & vbCrLf & _
+                          "  TP=" & Format(tpT, "0.0") & "  SL=" & Format(slT, "0.0") & vbCrLf & _
+                          "  日足仮想勝敗: " & verdict & vbCrLf & vbCrLf
+                    found = True
+                    Exit For
+                End If
+            End If
+        Next r
+
+        If Not found Then
+            msg = msg & codes(i) & " " & targetDates(i) & _
+                  ": 取得失敗（n=" & n & "）" & vbCrLf & vbCrLf
+        End If
+    Next i
+
+    Debug.Print msg
+    MsgBox msg, vbInformation, "過去3件 始値検証"
+End Sub
+
+
+'------------------------------------------------------
+' [P1-B] コア30銘柄 × 200本 ギャップバックテスト
+'
+' 実行前提：マーケットスピードII 起動・ログイン済み
+' 所要時間：約 5～15 分（Esc で中断可）
+'
+' 注意：
+'   ・「始値エントリー」の検証。現行の「時点騰落率エントリー」とは別物
+'   ・日足では高値/安値の到達順序が不明。両方到達 → 「不明（順序依存）」
+'   ・BASE_DATE を実行前に直近営業日に更新すること
+'------------------------------------------------------
+Sub BacktestGap200()
+    Const BT_START_OFFSET As Long = 290
+    Const BT_BARS         As Long = 200
+    Const BT_MIN_ROWS     As Long = 100
+    Const BT_CHUNK        As Long = 5
+    Const BT_TIMEOUT      As Long = 90
+    Const BT_GAP_MIN      As Double = 3#
+    Const BT_TP           As Double = 3#
+    Const BT_SL           As Double = 2#
+    Const BT_BLOCK_H      As Long = 210
+
+    Application.EnableCancelKey = xlErrorHandler
+    On Error GoTo BT_Aborted
+
+    Dim wsL As Worksheet
+    Set wsL = ThisWorkbook.Sheets("Watchlist")
+    Dim totalStocks As Long: totalStocks = 0
+    Dim lastWL As Long: lastWL = wsL.Cells(wsL.Rows.Count, 1).End(xlUp).Row
+    ReDim allCodes(1 To lastWL) As String
+    ReDim allNames(1 To lastWL) As String
+    Dim rr As Long
+    For rr = 2 To lastWL
+        Dim cd As String: cd = Trim(CStr(wsL.Cells(rr, 1).Value))
+        If Len(cd) >= 4 And IsNumeric(cd) Then
+            totalStocks = totalStocks + 1
+            allCodes(totalStocks) = cd
+            allNames(totalStocks) = CStr(wsL.Cells(rr, 2).Value)
+        End If
+    Next rr
+    If totalStocks = 0 Then MsgBox "Watchlist が空です。", vbCritical: Exit Sub
+
+    Dim wsOut As Worksheet
+    On Error Resume Next: Set wsOut = ThisWorkbook.Sheets("バックテスト"): On Error GoTo BT_Aborted
+    If wsOut Is Nothing Then
+        Set wsOut = ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count))
+        wsOut.Name = "バックテスト"
+    Else
+        wsOut.Cells.Clear
+    End If
+    wsOut.Range("A1:L1").Value = Array("証券コード", "銘柄名", "日付", "前日終値", _
+        "始値", "高値", "安値", "終値", "ギャップ率(%)", _
+        "TP目標", "SL目標", "日足仮想勝敗")
+
+    Dim wsW As Worksheet: Set wsW = GetSheet(SH_WORK)
+    wsW.Visible = xlSheetVisible
+
+    Dim outRow As Long: outRow = 2
+    Dim nGap As Long, nWin As Long, nLoss As Long, nUndet As Long, nUnknown As Long
+    Dim t0 As Single: t0 = Timer
+    Dim i As Long: i = 1
+
+    Dim btStartDate As Date: btStartDate = CDate(BASE_DATE) - BT_START_OFFSET
+    Dim btStartStr As String: btStartStr = Format(btStartDate, "yyyymmdd")
+
+    Application.ScreenUpdating = False
+
+    Do While i <= totalStocks
+        Dim k As Long: k = 0
+        ReDim chCodes(1 To BT_CHUNK) As String
+        ReDim chNames(1 To BT_CHUNK) As String
+        Dim j As Long
+        For j = i To Application.Min(i + BT_CHUNK - 1, totalStocks)
+            k = k + 1: chCodes(k) = allCodes(j): chNames(k) = allNames(j)
+        Next j
+
+        wsW.Range(wsW.Cells(1, 1), wsW.Cells(BT_BLOCK_H, k * BLOCK_W + 2)).Clear
+
+        For j = 1 To k
+            wsW.Cells(1, 1 + (j - 1) * BLOCK_W).Formula = _
+                "=RssChartPast(,""" & chCodes(j) & ".T"",""D""," & btStartStr & "," & BT_BARS & ")"
+        Next j
+
+        Dim tc As Single: tc = Timer
+        Dim ready As Long: ready = 0
+        Do
+            DoEvents
+            Application.Calculate
+            ready = 0
+            For j = 1 To k
+                If CountRows(wsW, 1 + (j - 1) * BLOCK_W) >= BT_MIN_ROWS Then ready = ready + 1
+            Next j
+            Application.StatusBar = "BacktestGap200: " & (i + k - 1) & "/" & totalStocks & _
+                " 銘柄  取得済み " & ready & "/" & k & _
+                "  経過 " & Int(Timer - t0) & " 秒  (Esc で中断)"
+            If ready >= k Then Exit Do
+        Loop While Timer - tc < BT_TIMEOUT
+
+        For j = 1 To k
+            Dim baseCol As Long: baseCol = 1 + (j - 1) * BLOCK_W
+            Dim n As Long: n = CountRows(wsW, baseCol)
+            If n < 5 Then GoTo BT_NextStock
+
+            Dim dat As Variant
+            dat = wsW.Range(wsW.Cells(DATA_ROW, baseCol), _
+                            wsW.Cells(DATA_ROW + n - 1, baseCol + 9)).Value
+
+            Dim asc As Boolean: asc = True
+            If n >= 2 Then
+                If IsDate(dat(1, 4)) And IsDate(dat(2, 4)) Then _
+                    asc = (CDate(dat(1, 4)) < CDate(dat(2, 4)))
+            End If
+
+            Dim rIdx As Long
+            For rIdx = 2 To n
+                Dim curP As Long, prevP As Long
+                If asc Then
+                    curP = rIdx: prevP = rIdx - 1
+                Else
+                    curP = n - rIdx + 1: prevP = n - rIdx + 2
+                End If
+
+                Dim prevCl As Double: prevCl = SafeD(dat(prevP, 9))
+                If prevCl <= 0 Then GoTo BT_NextBar
+                Dim openPrice As Double: openPrice = SafeD(dat(curP, 6))
+                If openPrice <= 0 Then GoTo BT_NextBar
+
+                Dim gapPct As Double
+                gapPct = (openPrice - prevCl) / prevCl * 100
+                If gapPct < BT_GAP_MIN Then GoTo BT_NextBar
+
+                nGap = nGap + 1
+                Dim hiPrice As Double: hiPrice = SafeD(dat(curP, 7))
+                Dim loPrice As Double: loPrice = SafeD(dat(curP, 8))
+                Dim clPrice As Double: clPrice = SafeD(dat(curP, 9))
+                Dim tpT As Double: tpT = openPrice * (1 + BT_TP / 100)
+                Dim slT As Double: slT = openPrice * (1 - BT_SL / 100)
+
+                Dim vtord As String
+                If hiPrice >= tpT And loPrice <= slT Then
+                    vtord = "不明": nUnknown = nUnknown + 1
+                ElseIf hiPrice >= tpT Then
+                    vtord = "利確": nWin = nWin + 1
+                ElseIf loPrice <= slT Then
+                    vtord = "損切": nLoss = nLoss + 1
+                Else
+                    vtord = "未達": nUndet = nUndet + 1
+                End If
+
+                wsOut.Cells(outRow, 1).Value  = chCodes(j)
+                wsOut.Cells(outRow, 2).Value  = chNames(j)
+                wsOut.Cells(outRow, 3).Value  = dat(curP, 4)
+                wsOut.Cells(outRow, 4).Value  = prevCl
+                wsOut.Cells(outRow, 5).Value  = openPrice
+                wsOut.Cells(outRow, 6).Value  = hiPrice
+                wsOut.Cells(outRow, 7).Value  = loPrice
+                wsOut.Cells(outRow, 8).Value  = clPrice
+                wsOut.Cells(outRow, 9).Value  = Round(gapPct, 2)
+                wsOut.Cells(outRow, 10).Value = Round(tpT, 1)
+                wsOut.Cells(outRow, 11).Value = Round(slT, 1)
+                wsOut.Cells(outRow, 12).Value = vtord
+                outRow = outRow + 1
+
+BT_NextBar:
+            Next rIdx
+BT_NextStock:
+        Next j
+
+        i = i + k
+    Loop
+
+    Dim sRow As Long: sRow = outRow + 2
+    wsOut.Cells(sRow,     1).Value = "【BacktestGap200 サマリー】"
+    wsOut.Cells(sRow + 1, 1).Value = "検査期間"
+    wsOut.Cells(sRow + 1, 2).Value = Format(btStartDate, "yyyy/mm/dd") & " ～ " & BASE_DATE
+    wsOut.Cells(sRow + 2, 1).Value = "対象"
+    wsOut.Cells(sRow + 2, 2).Value = totalStocks & " 銘柄 × " & BT_BARS & " 本"
+    wsOut.Cells(sRow + 3, 1).Value = "閾値"
+    wsOut.Cells(sRow + 3, 2).Value = "ギャップ>=" & BT_GAP_MIN & "% / TP+" & BT_TP & "% / SL-" & BT_SL & "%"
+    wsOut.Cells(sRow + 4, 1).Value = "ギャップ日数":     wsOut.Cells(sRow + 4, 2).Value = nGap
+    wsOut.Cells(sRow + 5, 1).Value = "利確（確定）":     wsOut.Cells(sRow + 5, 2).Value = nWin
+    wsOut.Cells(sRow + 6, 1).Value = "損切（確定）":     wsOut.Cells(sRow + 6, 2).Value = nLoss
+    wsOut.Cells(sRow + 7, 1).Value = "未達":             wsOut.Cells(sRow + 7, 2).Value = nUndet
+    wsOut.Cells(sRow + 8, 1).Value = "不明（順序依存）": wsOut.Cells(sRow + 8, 2).Value = nUnknown
+    If nWin + nLoss > 0 Then
+        wsOut.Cells(sRow + 9, 1).Value = "利確率（確定分）"
+        wsOut.Cells(sRow + 9, 2).Value = Format(nWin / (nWin + nLoss), "0.0%") & _
+            "  (n=" & (nWin + nLoss) & ")"
+    End If
+
+    wsW.Range(wsW.Cells(1, 1), wsW.Cells(BT_BLOCK_H, BT_CHUNK * BLOCK_W + 2)).Clear
+    wsW.Visible = xlSheetVeryHidden
+    Application.ScreenUpdating = True
+    Application.StatusBar = False
+    wsOut.Activate
+
+    MsgBox "BacktestGap200 完了。" & vbCrLf & vbCrLf & _
+           "ギャップ日数: " & nGap & vbCrLf & _
+           "利確=" & nWin & " / 損切=" & nLoss & _
+           " / 未達=" & nUndet & " / 不明=" & nUnknown & vbCrLf & _
+           IIf(nWin + nLoss > 0, "利確率（確定分）: " & _
+               Format(nWin / (nWin + nLoss), "0.0%") & vbCrLf, "") & _
+           vbCrLf & "「バックテスト」シートを確認・保存してください。", _
+           vbInformation, "BacktestGap200"
+    Exit Sub
+
+BT_Aborted:
+    Application.ScreenUpdating = True
+    Application.StatusBar = False
+    If Err.Number = 18 Then
+        MsgBox "Esc で中断しました（" & (i - 1) & " 銘柄まで完了）。", vbExclamation
+    Else
+        MsgBox "エラーで中断: " & Err.Number & " / " & Err.Description, vbCritical
+    End If
+End Sub
